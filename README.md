@@ -2,157 +2,163 @@
 An end-to-end data engineering, cloud, automation, and GenAI analytics platform for ingesting Zomato datasets, transforming them with dbt in Snowflake, enriching reviews with LLMs, and providing RAG and Text→SQL Streamlit interfaces.
 
 ## Project overview
-This repository implements a working data pipeline that loads raw datasets into Snowflake (via a Snowflake stage used by COPY INTO), runs dbt transformations to produce staging and marts, enriches reviews with LLMs, and exposes two Streamlit applications for RAG-based review Q&A and natural-language Text→SQL querying. Orchestration is provided by an Airflow DAG (airflow/dags/zomato_batch.py). The AI components use Mistral (mistralai client) in the code; additional provider integrations (Grok/XAI and Gemini) are present or commented for fallback/examples.
+A working pipeline that: places raw datasets in a cloud landing location, exposes them to Snowflake via a stage (used by COPY INTO), transforms data with dbt into staging and marts, enriches reviews using LLMs, and provides interactive Streamlit interfaces for RAG-based Q&A and natural-language Text→SQL. Apache Airflow orchestrates the pipeline (airflow/dags/zomato_batch.py).
 
 ## Technology stack
 - Python
-- Apache Airflow (docker-compose setup in airflow/)
+- Apache Airflow (airflow/docker-compose.yaml, airflow/dags/)
 - Docker (Airflow image + compose)
-- Snowflake (snowflake-connector used; COPY INTO from a Snowflake stage)
-- dbt (zomato/ dbt project; dbt-snowflake listed in requirements)
+- AWS (S3 landing + IAM policy examples under aws/iam/)
+- Snowflake (snowflake-connector usage and COPY INTO in DAG)
+- dbt (zomato/ dbt_project.yml)
 - Streamlit (ai/rag_chat.py, ai/text_to_sql.py)
-- Mistral LLM (mistralai client) — used for embeddings and chat
-- Grok (XAI) — present as fallback in code
-- (Gemini references present but commented out)
+- Mistral LLM (mistralai client) — embeddings and chat
+- Grok (XAI/OpenAI-compatible) — present as fallback in code
 - pandas, numpy
 
 ## Actual data flow
-The pipeline implemented in this repository follows this flow (the repository uses a Snowflake stage named @ZOMATO.RAW.ZOMATO_RAW_STAGE that the DAG copies from):
+The repository implements this pipeline; Airflow orchestrates the automated steps:
 
 ```mermaid
 flowchart TB
-  subgraph Orchestration
-    AIRFLOW["Apache Airflow\n(dag: zomato_batch)"]
+  subgraph Orch [Apache Airflow]
+    direction TB
+    A1[zomato_batch DAG]
   end
 
-  RAW["Raw datasets (landing location)"] --> STAGE["Snowflake stage\n@ZOMATO.RAW.ZOMATO_RAW_STAGE"]
-  STAGE --> RAW_TABLES["Snowflake RAW\nZOMATO.RAW.* (COPY INTO)"]
-  RAW_TABLES --> STAGING["Snowflake STAGING\n(dbt staging views)"]
+  RD["Raw dataset\n(landing: AWS S3)"] --> S3["AWS S3 / Raw landing"]
+  S3 --> STG["Snowflake stage\n(@ZOMATO.RAW.ZOMATO_RAW_STAGE)"]
+  STG --> RAW["Snowflake RAW\nZOMATO.RAW.* (COPY INTO)"]
+  RAW --> STAGING["Snowflake STAGING\n(dbt staging views)"]
   STAGING --> DBT["dbt transformations\n(zomato/)"]
   DBT --> MARTS["Snowflake MARTS\n(dbt materialized tables)"]
-  MARTS --> AI["AI Processing\n(enrichment, embeddings, RAG, Text→SQL)"]
-  AI --> STREAM["Streamlit UIs\n(ai/rag_chat.py, ai/text_to_sql.py)"]
+  MARTS --> AI["AI processing\n(enrichment, embeddings, RAG, Text→SQL)"]
+  AI --> UIs["Streamlit apps\n(ai/rag_chat.py, ai/text_to_sql.py)"]
 
-  AIRFLOW --> STAGE
-  AIRFLOW --> DBT
-  AIRFLOW --> AI
+  A1 --> STG
+  A1 --> DBT
+  A1 --> AI
 ```
 
-Notes:
-- The Airflow DAG executes COPY INTO statements that read from the Snowflake stage @ZOMATO.RAW.ZOMATO_RAW_STAGE and populate ZOMATO.RAW tables. The repository does not include explicit AWS S3 or external-stage configuration; if an external stage (S3) is used it must be configured in your Snowflake account outside this codebase.
-- dbt materialization settings are defined in zomato/dbt_project.yml (staging -> view, marts -> table).
+Key notes:
+- Raw datasets are expected in an S3 landing location (or other cloud storage) and exposed to Snowflake via an external stage. The DAG runs COPY INTO against `@ZOMATO.RAW.ZOMATO_RAW_STAGE` to populate ZOMATO.RAW tables.
+- dbt manages staging (views) and marts (tables) per `zomato/dbt_project.yml`.
+- AI enrichment runs after core dbt models and writes outputs to `ZOMATO.AI`.
 
 ## Airflow automation
-The repository provides an Airflow DAG at airflow/dags/zomato_batch.py (dag_id = `zomato_batch`). Actual task sequence and names (as implemented):
+Main DAG: `airflow/dags/zomato_batch.py` (dag_id=`zomato_batch`). Implemented task sequence:
 
-1. `reload_raw` — SQLExecuteQueryOperator using the `snowflake_default` connection. Executes a list of COPY INTO statements to populate ZOMATO.RAW.* tables from the stage @ZOMATO.RAW.ZOMATO_RAW_STAGE.
-2. `dbt_build_core` — BashOperator that runs dbt build excluding models tagged with `tag:ai` (core/staging/marts build).
-3. `enrich_reviews` — BashOperator that runs `python /opt/airflow/ai/enrich_reviews.py` to classify/enrich reviews and write results to ZOMATO.AI.REVIEW_ENRICHED.
-4. `dbt_build_ai` — BashOperator that runs dbt build selecting models tagged `tag:ai` (AI-dependent models).
+1. reload_raw — SQLExecuteQueryOperator (conn_id=`snowflake_default`) executing COPY INTO statements to populate ZOMATO.RAW.* from the Snowflake stage.
+2. dbt_build_core — BashOperator: `dbt build --exclude tag:ai` for core/staging/mart models.
+3. enrich_reviews — BashOperator: `python /opt/airflow/ai/enrich_reviews.py` (LLM-based enrichment writing to ZOMATO.AI.REVIEW_ENRICHED).
+4. dbt_build_ai — BashOperator: `dbt build --select tag:ai` for AI-dependent models.
 
-The DAG links: `reload_raw >> dbt_build_core >> enrich_reviews >> dbt_build_ai`. The Airflow compose file (airflow/docker-compose.yaml) provides a local Airflow setup and injects required environment variables into the containers (SNOWFLAKE_*, MISTRAL_API_KEY, and the Airflow Snowflake connection JSON in environment as shown).
+DAG dependency chain: `reload_raw >> dbt_build_core >> enrich_reviews >> dbt_build_ai`.
+
+The included `airflow/docker-compose.yaml` provides a local Airflow setup and mounts the dbt project and `ai/` scripts into the Airflow container.
+
+## AWS / IAM (what's in this repo)
+This repository includes IAM policy and trust-policy examples under `aws/iam/`.
+
+- `aws/iam/s3-read-policy.json` — example IAM policy that allows S3 read access (GetObject, GetObjectVersion, ListBucket, GetBucketLocation) for `arn:aws:s3:::<BUCKET>` and `arn:aws:s3:::<BUCKET>/*`. Replace `<BUCKET>` with your actual bucket name before applying.
+
+- `aws/iam/snowflake-role-trust-policy-initial.json` — example trust policy allowing `arn:aws:iam::<ACCOUNT_ID>:root` to assume a role (placeholder form).
+
+- `aws/iam/snowflake-role-trust-policy-final.json` — example trust policy that allows a specific AWS principal (`<STORAGE_AWS_IAM_USER_ARN>`) to assume role with an `sts:ExternalId` condition (`<STORAGE_AWS_EXTERNAL_ID>`). This reflects a common Snowflake-AWS trust pattern but contains placeholders to be replaced in your environment.
+
+Important:
+- These files are templates/examples. Do not deploy them without replacing placeholders and reviewing permissions.
+- The repository does not create S3 buckets or Snowflake external stages; these IAM files are provided as deployment references for configuring S3 access and role trust for Snowflake external stages.
 
 ## Snowflake data architecture
-The repository targets these Snowflake layers and objects (as used by code and dbt config):
-- RAW: ZOMATO.RAW.* tables populated by COPY INTO from @ZOMATO.RAW.ZOMATO_RAW_STAGE (see Airflow DAG).
-- STAGING: dbt staging models (zomato/ configured to materialize staging models as views in schema `staging` — see zomato/dbt_project.yml).
-- MARTS: analytical tables produced by dbt (configured as `table` materializations in schema `marts`).
-
-The enrichment step writes AI outputs into schema `ZOMATO.AI` (table REVIEW_ENRICHED created by ai/enrich_reviews.py).
+Layers used by code and dbt:
+- RAW — `ZOMATO.RAW.*` populated via COPY INTO from `@ZOMATO.RAW.ZOMATO_RAW_STAGE` (Airflow `reload_raw`).
+- STAGING — dbt staging models configured as `view` (see `zomato/dbt_project.yml`).
+- MARTS — dbt materialized `table` models in the `marts` schema.
+- AI — `ZOMATO.AI.REVIEW_ENRICHED` (created/consumed by `ai/enrich_reviews.py`).
 
 ## dbt
-- Project: zomato/ (zomato/dbt_project.yml present).
-- Materializations: staging models configured as `view`; marts configured as `table` (dbt_project.yml).
-- The repository includes the models directory scaffold (zomato/models/) — apply your dbt profile (profiles.yml) to connect to Snowflake.
+- Project: `zomato/` (contains `dbt_project.yml`).
+- Materializations (per `dbt_project.yml`): staging models -> `view` (schema `staging`); marts -> `table` (schema `marts`).
+- The Airflow DAG runs dbt commands with `--profiles-dir` pointing at the dbt project directory as mounted into Airflow.
 
-Usage (same commands used in Airflow DAG):
-
+Commands used by Airflow / recommended for local runs:
 ```bash
-# core models (exclude AI-tagged models)
+# core models
 dbt build --project-dir zomato --profiles-dir zomato --exclude tag:ai
-
-# AI-dependent models (tagged tag:ai)
+# ai models
 dbt build --project-dir zomato --profiles-dir zomato --select tag:ai
 ```
 
 ## AI / GenAI components
-All AI components are implemented under ai/.
+All AI code is under `ai/`.
 
-### LLM review enrichment (ai/enrich_reviews.py)
-- Reads reviews from ZOMATO.RAW.REVIEWS (Airflow limits per run via SAMPLE_N in code).
-- For each review it produces the following fields and inserts them into ZOMATO.AI.REVIEW_ENRICHED:
-  - sentiment_label (positive / negative / neutral)
-  - sentiment_score (float between -1.0 and 1.0)
-  - topic (one of a small predefined set)
-  - key_issue (short phrase up to ~6 words or null)
-  - model (string identifying the model used)
-- Providers and fallback logic visible in code:
-  - Primary implemented provider: Mistral (mistralai client) — classify_with_mistral()
-  - Fallback: Grok via an OpenAI-compatible XAI endpoint (classify_with_grok)
-  - Gemini-related code is present but commented out; current runtime fallback order in classify_review() tries Mistral, then Grok.
+### LLM Review Enrichment (`ai/enrich_reviews.py`)
+- Reads up to `SAMPLE_N` reviews from `ZOMATO.RAW.REVIEWS` that are not present in `ZOMATO.AI.REVIEW_ENRICHED`.
+- For each review, the script produces and stores:
+  - `sentiment_label` (positive/neutral/negative)
+  - `sentiment_score` (float)
+  - `topic` (predefined list)
+  - `key_issue` (short phrase or null)
+  - `model` (model identifier used)
+- Provider/fallback logic (as implemented): primary provider is Mistral (`mistralai` client). Grok via an XAI-compatible OpenAI client is implemented as a fallback. Gemini-related code exists but is commented out.
 
-### RAG review analytics (ai/rag_chat.py)
-- Reads a sample of reviews from ZOMATO.STAGING.STG_REVIEWS and computes embeddings (EMBEDDING_MODEL = "mistral-embed").
-- Embeddings are cached locally to `review_embeddings.parquet` (AI folder).
-- Similarity search: cosine similarity between question embedding and review embeddings; selects top-K results.
-- LLM answer: constructs a prompt with top review texts and asks the chat model (CHAT_MODEL = "mistral-small-latest") to answer — results presented in a Streamlit app.
+### RAG Review Analytics (`ai/rag_chat.py`)
+- Reads a sample from `ZOMATO.STAGING.STG_REVIEWS`.
+- Embeddings: `EMBEDDING_MODEL = "mistral-embed"` (Mistral client).
+- Embeddings are cached to `ai/review_embeddings.parquet`.
+- Retrieval: cosine similarity; selects top-K reviews and asks the chat model (`mistral-small-latest`) to synthesize an answer displayed in Streamlit.
 
-### Text→SQL (ai/text_to_sql.py)
-- Workflow implemented in code:
-  1. User provides a natural-language question in Streamlit.
-  2. LLM (Mistral; MODEL = "mistral-small-latest") generates a JSON payload containing a SELECT query.
-  3. Safety validation: generated SQL is checked against a FORBIDDEN_WORDS list (drop, delete, truncate, alter, update, insert, create, replace, grant, revoke) and must start with `select` or `with`.
-  4. If safe, SQL is executed against Snowflake (schema `MARTS`/dbt outputs) and results are displayed.
-- The code explicitly strips schema/database prefixes returned by the model before execution and limits output sizes (dbt/SQL guidance in system prompt).
+### Text→SQL (`ai/text_to_sql.py`)
+- User asks a question in Streamlit.
+- LLM (`mistral-small-latest`) generates a JSON response containing a `sql` field with a SELECT query.
+- Safety: generated SQL must start with `select` or `with` and must not contain forbidden words (e.g., drop, delete, truncate, alter, update, insert, create, replace, grant, revoke).
+- If safe, the SQL is executed against Snowflake (schema `MARTS`) and results displayed; the script strips schema prefixes before execution.
 
 ## Screenshots
-The repository contains a Screenshot/ folder. Screenshots are included below in the exact sequence stored in the repository:
+Included in the repository; sequence preserved below (exact filenames):
 
-![Screenshot 1](Screenshot/Screenshot%202026-08-12%20003219.png)
+![Screenshot 2026-08-12 003219](Screenshot/Screenshot%202026-08-12%20003219.png)
 
-![Screenshot 2](Screenshot/Screenshot%202026-08-12%20003314.png)
+![Screenshot 2026-08-12 003314](Screenshot/Screenshot%202026-08-12%20003314.png)
 
-![Screenshot 3](Screenshot/Screenshot%202026-08-12%20003336.png)
+![Screenshot 2026-08-12 003336](Screenshot/Screenshot%202026-08-12%20003336.png)
 
-![Screenshot 4](Screenshot/Screenshot%202026-08-12%20004106.png)
+![Screenshot 2026-08-12 004106](Screenshot/Screenshot%202026-08-12%20004106.png)
 
-![Screenshot 5](Screenshot/Screenshot%202026-08-12%20004119.png)
+![Screenshot 2026-08-12 004119](Screenshot/Screenshot%202026-08-12%20004119.png)
 
-![Screenshot 6](Screenshot/Screenshot%202026-08-12%20004154.png)
+![Screenshot 2026-08-12 004154](Screenshot/Screenshot%202026-08-12%20004154.png)
 
-![Screenshot 7](Screenshot/Screenshot%202026-08-12%20004455.png)
+![Screenshot 2026-08-12 004455](Screenshot/Screenshot%202026-08-12%20004455.png)
 
-![Screenshot 8](Screenshot/Screenshot%202026-08-12%20004506.png)
+![Screenshot 2026-08-12 004506](Screenshot/Screenshot%202026-08-12%20004506.png)
 
-![Screenshot 9](Screenshot/Screenshot%202026-08-12%20004515.png)
+![Screenshot 2026-08-12 004515](Screenshot/Screenshot%202026-08-12%20004515.png)
 
-![Screenshot 10](Screenshot/Screenshot%202026-08-12%20004706.png)
+![Screenshot 2026-08-12 004706](Screenshot/Screenshot%202026-08-12%20004706.png)
 
-![Screenshot 11](Screenshot/Screenshot%202026-08-12%20004714.png)
+![Screenshot 2026-08-12 004714](Screenshot/Screenshot%202026-08-12%20004714.png)
 
-![Screenshot 12](Screenshot/Screenshot%202026-08-12%20005405.png)
+![Screenshot 2026-08-12 005405](Screenshot/Screenshot%202026-08-12%20005405.png)
 
-![Screenshot 13](Screenshot/Screenshot%202026-08-12%20010510.png)
-
-> Screenshots are provided as reference for the Streamlit UI and app interactions. Filenames and order are preserved from the repository.
+![Screenshot 2026-08-12 010510](Screenshot/Screenshot%202026-08-12%20010510.png)
 
 ## Dataset
-The dataset used for development and testing is available here:
-
 - Google Drive: https://drive.google.com/drive/folders/1_dwsOGOMeiklN4Xi6_wAJoQ7-OuKLnQM
 
-(Use the dataset to populate your Snowflake stage or local test data as appropriate.)
-
-## Repository structure (important folders)
+## Repository structure (important)
 ```
-ai/                 # LLM scripts, Streamlit apps, embeddings cache
-airflow/            # Airflow Dockerfile, docker-compose.yaml, DAGs
+ai/                 # LLM scripts and Streamlit apps
+airflow/            # Dockerfile, docker-compose.yaml, dags/
+aws/                # IAM policy and trust-policy examples (s3-read-policy, snowflake-role-trust)
 zomato/             # dbt project (dbt_project.yml, models/)
-Screenshot/          # UI screenshots (preserved filenames and order)
-requirements.txt     # minimal requirements (dbt-snowflake)
+Screenshot/          # UI screenshots (preserved order)
+requirements.txt
+README.md
 ```
 
-## Setup and running (quick start)
+## Quick setup & running (concise)
 1. Clone
 ```bash
 git clone https://github.com/BaljeetkumarPatel/Zomato-Intelligent-Data-Automation-Platform.git
@@ -160,63 +166,51 @@ cd Zomato-Intelligent-Data-Automation-Platform
 ```
 
 2. Environment variables
-- Copy `ai/example.env` to `.env` or set the required environment variables for Snowflake and LLMs. Example variables used in code:
-  - SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD
-  - SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE, SNOWFLAKE_SCHEMA
-  - MISTRAL_API_KEY, XAI_API_KEY (optional)
-- dbt requires a `profiles.yml` configured for your Snowflake account (not included in this repo).
+- Copy `ai/example.env` to `.env` or set variables in your environment. Key variables referenced in code:
+  - `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`
+  - `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_DATABASE`, `SNOWFLAKE_SCHEMA`
+  - `MISTRAL_API_KEY`, `XAI_API_KEY` (optional)
+- Add a dbt `profiles.yml` for Snowflake (not included).
 
-3. Airflow (local via docker-compose)
+3. Airflow (local via Docker Compose)
 ```bash
 cd airflow
-# copy a filled .env (follow the comments in docker-compose.yaml)
-# build and start
+# populate .env referenced by docker-compose.yaml
 docker compose build && docker compose up -d
-# Airflow UI: http://localhost:8080 (admin/admin by default in compose comments)
+# Airflow UI: http://localhost:8080
 ```
-The Airflow image mounts the dbt project and ai/ folder into /opt/airflow inside the container as shown in airflow/docker-compose.yaml.
 
-4. Run Streamlit apps locally
-- Install dependencies (example):
+4. Run Streamlit apps (local dev)
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-# install additional packages used by ai/ if not covered by requirements.txt
 pip install streamlit mistralai snowflake-connector-python pandas numpy
-```
-- Start apps:
-```bash
+
 streamlit run ai/rag_chat.py
 streamlit run ai/text_to_sql.py
 ```
 
-5. dbt
-- From the project root (or inside the environment used by Airflow):
+5. dbt (local or container)
 ```bash
 # core models
 dbt build --project-dir zomato --profiles-dir zomato --exclude tag:ai
-
-# AI models (if present)
+# ai models
 dbt build --project-dir zomato --profiles-dir zomato --select tag:ai
 ```
 
-## Security & configuration notes
-- Do not commit secrets. Keep `.env`, `ai/example.env` (copy to local .env), and dbt `profiles.yml` out of version control.
-- The repository contains example environment variable names; actual credentials (Snowflake, Mistral, etc.) must be provided securely.
-- The Text→SQL component implements a simple forbid-list and checks that generated SQL starts with `select` or `with` — treat generated SQL as untrusted and validate in your environment.
+## Security notes
+- Do not commit secrets. Keep `.env`, `ai/example.env` (copy to local .env), and dbt `profiles.yml` out of source control.
+- The IAM JSON files under `aws/iam/` are templates and include placeholders — replace them with real ARNs/IDs and review before deployment.
+- Treat LLM outputs as untrusted. The Text→SQL module implements a forbid-list and a simple `SELECT/WITH` requirement — review generated SQL before running in production.
 
 ## Key features
-- Airflow DAG that orchestrates data loading, dbt runs and an LLM enrichment step (`zomato_batch` DAG).
-- Snowflake-based RAW → STAGING → MARTS architecture (dbt manages staging and marts materializations).
-- LLM-based review enrichment pipeline that writes to ZOMATO.AI.REVIEW_ENRICHED.
+- Airflow DAG (`zomato_batch`) orchestrates: Snowflake stage COPY → dbt core → LLM enrichment → dbt AI models.
+- Snowflake RAW → STAGING → MARTS architecture (dbt manages staging and marts materializations).
+- LLM-based review enrichment pipeline writing to `ZOMATO.AI.REVIEW_ENRICHED` (Mistral primary, Grok fallback).
 - RAG Streamlit app with cached embeddings and cosine-similarity retrieval.
 - Text→SQL Streamlit app with LLM-generated SQL and explicit safety checks before execution.
 
-## Project highlights
-- End-to-end pipeline spanning ingestion (Snowflake stage + COPY), transformation (dbt), orchestration (Airflow), and AI enrichment (Mistral + fallback).
-- Practical safety and operational considerations: SQL safety checks, embedding cache, and Airflow orchestration through docker-compose.
-
 ---
 
-If you want, I can now commit this content to README.md in the repository. I will preserve all screenshot paths and not modify other files.
+If you want further edits (condensed recruiter summary, expanded setup steps, or adding short run examples), tell me which sections to adjust and I'll update README.md.
