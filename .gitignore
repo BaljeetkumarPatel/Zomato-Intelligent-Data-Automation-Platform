@@ -1,0 +1,12 @@
+.env
+zomato/target/
+zomato/dbt_packages/
+zomato/logs/
+zomato/.env
+zomato/dbt_internal_packages/
+Study_Material
+logs/dbt.log
+Data
+airflow/.env
+ai/.env
+.venv

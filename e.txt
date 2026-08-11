@@ -1,0 +1,86 @@
+use(type in terminal) = dbt init zomato
+  - hum isliye kr rahe hia taki hum dbt apne local machine se kr sake
+  - connect karega snowflake aur hum kaam kr sakenge
+
+
+to run model Stage file
+     dbt run --select staging 
+
+
+to run model mart file
+    dbt run --select marts
+
+to perform test run command in terminal
+   dbt test
+
+to run dbt model from start to end use this command
+  dbt build
+
+dbt docs generate && dbt docs serve - generate docs and run on small server (powershell main && support nhi krta hai ti alaga laga run krna )
+
+docker
+   docker-compose build
+
+
+to start prosgress server  
+   docker-compose up -d
+
+
+| Component          | Job                                             |
+| ------------------ | ----------------------------------------------- |
+| **Docker**         | Runs isolated environments/containers           |
+| **Docker Compose** | Creates and connects all your containers        |
+| **PostgreSQL**     | Stores Airflow metadata                         |
+| **Airflow Init**   | Initializes DB + creates admin user             |
+| **API Server**     | Airflow UI/API                                  |
+| **Scheduler**      | Decides when tasks should run                   |
+| **DAG Processor**  | Reads/parses DAG Python files                   |
+| **DAG**            | Defines your pipeline                           |
+| **dbt**            | Performs SQL-based transformations              |
+| **Snowflake**      | Your data warehouse                             |
+| **Volumes**        | Share/persist files between host and containers |
+| **`.env`**         | Stores configuration/secrets                    |
+
+
+
+Your actual pipeline
+
+                    Windows
+                       │
+                    Docker
+                       │
+             ┌─────────┴─────────┐
+             │                   │
+        PostgreSQL            Airflow
+             │                   │
+       Airflow metadata          │
+                                 │
+              ┌──────────────────┼─────────────────┐
+              │                  │                 │
+          API Server         Scheduler       DAG Processor
+              │                  │                 │
+              └──────────────────┴─────────────────┘
+                                 │
+                                DAG
+                                 │
+                    ┌────────────┴────────────┐
+                    │                         │
+                   dbt                    AI code
+                    │                         │
+                    └────────────┬────────────┘
+                                 │
+                                 ▼
+                              Snowflake
+                                 │
+                                 ▼
+                         Zomato Analytics
+
+          
+to stop/remove
+   docker-compose down
+
+   docker-compose down ka purpose hai Docker Compose se jo containers/services tumne start kiye hain, unko stop karke remove karna.
+
+
+
+

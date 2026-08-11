@@ -1,0 +1,13 @@
+zomato:
+  outputs:
+    dev:
+      account: USWYQUS-PC83660
+      database: ZOMATO
+      password: Megha@26Navya@24
+      role: DBT_ROLE
+      schema: StAGING
+      threads: 8
+      type: snowflake
+      user: BALJEETKUMARPATEL
+      warehouse: ZOMATO_WH
+  target: dev
