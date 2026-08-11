@@ -4,6 +4,7 @@ zomato/dbt_packages/
 zomato/logs/
 zomato/.env
 zomato/dbt_internal_packages/
+zomato/.user.yml
 Study_Material
 logs/dbt.log
 Data
